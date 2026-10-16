@@ -72,12 +72,69 @@ class _RateLimits:
     def __init__(self, variant_id: str = "") -> None:
         self.variant_id = variant_id
         self._until: dict[str, float] = {}
+        self._loaded = False
 
     def mark(self, model: str | None, *, until: float | None = None) -> None:
         stamp = until if isinstance(until, (int, float)) and until > time.time() else time.time() + self.DEFAULT_COOLDOWN_S
         model_id = str(model or "").strip()
         if model_id:
+            self._load()
             self._until[model_id] = max(self._until.get(model_id, 0.0), stamp)
+            self._save()
+
+    def _load(self) -> None:
+        """从盘上恢复（只做一次）；过期的丢掉。"""
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            data = json.loads(_state_path().read_text("utf-8"))
+            models = (data.get("variants") or {}).get(self.variant_id) or {}
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.debug("workbuddy: 限流账本读取失败，按空的算", exc_info=True)
+            return
+        now = time.time()
+        for model_id, value in models.items():
+            try:
+                stamp = float(value)
+            except (TypeError, ValueError):
+                continue
+            if stamp > now:
+                self._until[str(model_id)] = stamp
+
+    def _save(self) -> None:
+        """合并写回（别的进程可能也记过账；同模型取较晚的解除时间）。"""
+        try:
+            path = _state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(path.read_text("utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            except FileNotFoundError:
+                data = {}
+            except Exception:
+                data = {}
+            variants = dict(data.get("variants") or {})
+            merged = {}
+            for source in (variants.get(self.variant_id) or {}, self._until):
+                if not isinstance(source, dict):
+                    continue
+                for model_id, value in source.items():
+                    try:
+                        stamp = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    merged[str(model_id)] = max(float(merged.get(str(model_id), 0.0)), stamp)
+            now = time.time()
+            variants[self.variant_id] = {k: v for k, v in merged.items() if v > now}
+            data["variants"] = variants
+            data["updated_at"] = now
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+        except Exception:
+            logger.debug("workbuddy: 限流账本写入失败（不影响请求）", exc_info=True)
 
     def until(self, model: str | None = None) -> float:
         """该模型的限流解除时间戳；0 = 没在限流。不给 model 时返回"任何模型被限"的最晚时间。
@@ -86,6 +143,7 @@ class _RateLimits:
         hy3、glm-5.3-flash、step-5-preview 同一账号同一时刻正常返回），
         所以不能把一个模型的限流摊到整个账号上。
         """
+        self._load()
         now = time.time()
         self._until = {key: value for key, value in self._until.items() if value > now}
         if model:
@@ -98,7 +156,9 @@ class _RateLimits:
         return dict(self._until)
 
     def clear(self) -> None:
+        self._load()
         self._until.clear()
+        self._save()
 
     def snapshot(self) -> dict[str, Any]:
         """当前还活着的限流时间戳（诊断用）。"""
@@ -110,6 +170,23 @@ class _RateLimits:
 
 # 变体 id -> _RateLimits（两个账号各记各的，互不污染）。
 RATE_LIMITS: dict[str, _RateLimits] = {}
+
+# 限流账本落盘的位置：进程重启后标记还在（否则重启一次"限流没标出来"就复现一次）。
+# 放在 cache/ 下：这是一份可随时丢弃的运行时观察，过期项在读取时就清掉。
+_LEDGER_FILENAME = "workbuddy-rate-limits.json"
+
+
+def _state_path() -> Path:
+    """账本文件路径（``$HERMES_HOME/cache/…``）。"""
+    home = os.environ.get("HERMES_HOME", "").strip()
+    if not home:
+        try:
+            from hermes_constants import get_hermes_home   # 运行环境自带
+            home = str(get_hermes_home())
+        except Exception:
+            local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+            home = str(Path(local) / "hermes")
+    return Path(home) / "cache" / _LEDGER_FILENAME
 
 
 def _limits_for(variant: Variant) -> _RateLimits:
