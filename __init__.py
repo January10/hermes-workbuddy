@@ -72,34 +72,38 @@ class _RateLimits:
     def __init__(self, variant_id: str = "") -> None:
         self.variant_id = variant_id
         self._until: dict[str, float] = {}
-        self.account_until: float = 0.0   # 整个账号级（6004 是账号频率上限，不只是某个模型）
 
     def mark(self, model: str | None, *, until: float | None = None) -> None:
         stamp = until if isinstance(until, (int, float)) and until > time.time() else time.time() + self.DEFAULT_COOLDOWN_S
-        self.account_until = max(self.account_until, stamp)
         model_id = str(model or "").strip()
         if model_id:
             self._until[model_id] = max(self._until.get(model_id, 0.0), stamp)
 
     def until(self, model: str | None = None) -> float:
-        """该模型（或整个账号）的限流解除时间戳；0 = 没在限流。"""
+        """该模型的限流解除时间戳；0 = 没在限流。不给 model 时返回"任何模型被限"的最晚时间。
+
+        **按模型记**：上游 6004 实测是"某几个模型"被限（deepseek-v4.1-flash / -sg 被限时，
+        hy3、glm-5.3-flash、step-5-preview 同一账号同一时刻正常返回），
+        所以不能把一个模型的限流摊到整个账号上。
+        """
         now = time.time()
         self._until = {key: value for key, value in self._until.items() if value > now}
-        if self.account_until <= now:
-            self.account_until = 0.0
         if model:
-            return max(self._until.get(str(model), 0.0), self.account_until, 0.0)
-        return max([self.account_until, *self._until.values()], default=0.0)
+            return max(self._until.get(str(model), 0.0), 0.0)
+        return max(self._until.values(), default=0.0)
+
+    def limited_models(self) -> dict[str, float]:
+        """当前被限的模型 -> 解除时间戳（还活着的）。"""
+        self.until()   # 顺手清理过期项
+        return dict(self._until)
 
     def clear(self) -> None:
         self._until.clear()
-        self.account_until = 0.0
 
     def snapshot(self) -> dict[str, Any]:
         """当前还活着的限流时间戳（诊断用）。"""
         now = time.time()
         return {
-            "account": self.account_until if self.account_until > now else 0.0,
             "models": {k: v for k, v in self._until.items() if v > now},
         }
 
@@ -1027,14 +1031,23 @@ class WorkBuddyProfile(ProviderProfile):
     # 注入时同时把事实记进 RATE_LIMITS —— 面板与模型选择器读它标红。
 
     def model_rate_limited_until(self, model: str | None) -> float:
-        """该模型（或本账号）当前的限流解除时间戳；0 = 正常。面板/徽标用。"""
+        """该模型的限流解除时间戳；0 = 正常。面板/徽标用（按模型）。"""
         _forget_if_account_changed(self.variant)
         return max(_limits_for(self.variant).until(model), 0.0)
 
     def account_rate_limited_until(self) -> float:
-        """整个账号的限流解除时间戳；0 = 正常。"""
+        """本账号"最近有模型被限"的最晚解除时间；0 = 都正常。
+
+        注意口径：上游 6004 是**按模型**限的，这个值只用来决定"要不要在页面上提一句"，
+        不代表账号整体不可用（实测同账号下别的模型照常跑）。
+        """
         _forget_if_account_changed(self.variant)
         return max(_limits_for(self.variant).until(), 0.0)
+
+    def rate_limited_models(self) -> dict[str, float]:
+        """当前被限的模型 -> 解除时间戳（页面横幅列名字用）。"""
+        _forget_if_account_changed(self.variant)
+        return dict(_limits_for(self.variant).limited_models())
 
     def model_status(self, model: str | None) -> str | None:
         """徽标用的短状态：``限免`` / ``免费`` / ``试用`` / ``限时 ×0.5`` / ``×0.79``。"""
@@ -1367,17 +1380,9 @@ def _make_error_classifier(variant: Variant):
             # False 同时让 _profile_verdict 保留 rate_limit 家族默认的"退避后重试"行为。
             "should_fallback": False,
             "error_context": {
-                "workbuddy_scope": "account",
-                # 用标准键名 ``reset_at``：凭据池的 _bench() 读 ``normalized_error["reset_at"]``
-                # 写进 entry.last_error_reset_at，于是 limit_state() 回报
-                # {"scope":"account","resets_at":…}，模型选择器就画出 core 自带的红色
-                # 「重置」徽标（我无法给那个 muted badge 上色，只能喂数据）。
+                # 用标准键名 ``reset_at``：错误卡的「Limit resets at HH:mm」与恢复链的
+                # 退避都读它（``extract_api_error_context`` 只认这个键；自定义名会被丢掉）。
                 "reset_at": reset_at or 0.0,
-                # ``reason`` 会被 _recover_rate_limit 拿去比 _USAGE_LIMIT_REASON_TOKENS，
-                # 命中就**跳过** has_retried_429 那次"先重试一次再说"的推迟，
-                # 第一次失败就直接 bench → 徽标立刻变红（上游原文里没有
-                # "usage limit reached" 这类词，不补这个就得等第二次失败）。
-                "reason": "usage_limit_reached",
             },
         }
 
@@ -1392,22 +1397,16 @@ def _stamp_reset_at(error: Any, reset_at: float | None) -> None:
     ``error_context``）。上游给的是 ``... will reset at 2026-10-16 20:44:55 UTC+8`` 这种自由文本，
     谁也解析不出来，所以钩子里主动补一个标准字段 —— 否则卡上只有归因、没有时间。
 
-    同一个道理：``turn_api_error`` 把 ``error_context`` 喂给恢复链时也走
-    ``extract_api_error_context``（只读 body），所以 ``reason`` 也要补进 body ——
-    ``_recover_rate_limit`` 靠它命中 ``_USAGE_LIMIT_REASON_TOKENS`` 来跳过一次"先重试"的推迟，
-    第一次失败就能 bench 掉凭据，模型选择器的红色徽标才会立刻出现。
+    注意**不要**动 ``body["code"]``：``_recover_rate_limit`` 会拿它去比
+    ``_USAGE_LIMIT_REASON_TOKENS``，命中就会把整个凭据 bench 掉，而 6004 实测是
+    **按模型**限的（同账号别的模型照常跑），bench 整个凭据会让选择器把所有行都变灰。
     """
     if not reset_at:
         return
     body = getattr(error, "body", None)
-    if isinstance(body, dict):
+    if isinstance(body, dict) and not any(body.get(key) for key in ("reset_at", "resets_at", "retry_after")):
         try:
-            if not any(body.get(key) for key in ("reset_at", "resets_at", "retry_after")):
-                body["reset_at"] = reset_at
-            # ``extract_api_error_context`` 取 reason 的顺序是 code → type → error，
-            # 所以换掉 ``code`` 最省事（上游那个 6004 已经用完了，钩子也不再看它）。
-            if not body.get("reason"):
-                body["code"] = "usage_limit_reached"
+            body["reset_at"] = reset_at
         except (TypeError, AttributeError):
             logger.debug("workbuddy: 无法把 reset_at 写回异常体", exc_info=True)
 

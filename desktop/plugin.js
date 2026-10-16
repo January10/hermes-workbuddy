@@ -63,6 +63,23 @@ async function refreshRateCache() {
   }
 }
 
+/** 选择器行首的红点：badge 是 core 渲染的灰色文字（variant="muted"，插件改不了颜色），
+ *  只有 icon 槽能自己画 —— 所以被限流的模型在行首额外点一个真红点。 */
+function limitedDot(row, hint) {
+  if (!rateLimitText(row)) return null
+  return jsx('span', {
+    title: hint || '被上游限流',
+    style: {
+      display: 'block',
+      width: '0.5rem',
+      height: '0.5rem',
+      borderRadius: '9999px',
+      background: 'var(--ui-red)',
+      boxShadow: '0 0 0 2px color-mix(in srgb, var(--ui-red) 22%, transparent)'
+    }
+  })
+}
+
 const MUTED = { color: 'var(--ui-text-quaternary)' }
 const MUTED_SMALL = { color: 'var(--ui-text-quaternary)', fontSize: '11px' }
 const LABEL = { color: 'var(--ui-text-secondary)', fontSize: '12px' }
@@ -147,7 +164,8 @@ function fmtEfforts(row) {
 }
 
 function statusTone(row) {
-  if (rateLimitText(row)) return { color: 'var(--ui-accent)', fontWeight: 700 }
+  // 限流是"现在不能用的东西"——用真正的红色（--ui-red），不是主题强调色（那个在多数主题里是绿的）。
+  if (rateLimitText(row)) return { color: 'var(--ui-red)', fontWeight: 700 }
   if (row.status === '限免' || row.status === '免费' || row.free === true) {
     return { color: 'var(--ui-accent)', fontWeight: 600 }
   }
@@ -306,17 +324,18 @@ function ModelTable({ variant }) {
   return jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' }, children: rows })
 }
 
-/** 账号级限流横幅：整个账号被上游按频率挡住时，卡片顶部单独说一行。 */
+/** 被限流的模型横幅：逐模型列出来（6004 是按模型限的，不是账号级）。 */
 function AccountRateLimit({ variant }) {
-  const until = Number(variant && variant.rate_limited_until)
-  if (!Number.isFinite(until) || until <= 0) return null
-  const left = until * 1000 - Date.now()
-  if (left <= 0) return null
-  const mins = Math.max(1, Math.round(left / 60_000))
-  const at = new Date(until * 1000).toLocaleTimeString()
+  const list = Array.isArray(variant && variant.rate_limited_models) ? variant.rate_limited_models : []
+  const live = list.filter((item) => Number(item && item.until) * 1000 > Date.now())
+  if (!live.length) return null
+  const names = live.map((item) => item.id)
+  const soonest = Math.min(...live.map((item) => Number(item.until)))
+  const mins = Math.max(1, Math.round((soonest * 1000 - Date.now()) / 60_000))
+  const at = new Date(soonest * 1000).toLocaleTimeString()
   return jsx('div', {
-    style: { fontSize: '12px', fontWeight: 600, color: 'var(--ui-accent)' },
-    children: `账号被上游限流（频率上限）：约 ${mins} 分钟后（${at}）恢复；这期间换模型也可能继续撞墙。`
+    style: { fontSize: '12px', fontWeight: 600, color: 'var(--ui-red)' },
+    children: `被上游限流的模型（频率上限）：${names.join('、')} — ${at} 恢复（约 ${mins} 分钟后）；其它模型正常可用。`
   })
 }
 
@@ -387,7 +406,7 @@ function WorkBuddyPage() {
         children: ['刷新']
       })
     ] }),
-    jsx('div', { style: MUTED_SMALL, children: '状态 = 上游给的活动/试用标记（限免 = 活动期内免费；免费 = 基础倍率 ×0；试用 = 有免费试用期）；倍率 = 每次调用消耗积分的倍数，活动价优先；推理档位里的 [方括号] 那档，就是「当前强度」列实际会发出去的档位（你设过 /reasoning 或 config 就按你的来；显示"官方默认"= 该模型没声明档位，不发参数）；「xx:xx 恢复」= 上游按频率挡住了这个账号（报文自带的恢复时间），换模型或等它过去；额度只列总计与 3 天内到期的包；60 秒自动刷新一次。' }),
+    jsx('div', { style: MUTED_SMALL, children: '状态 = 上游给的活动/试用标记（限免 = 活动期内免费；免费 = 基础倍率 ×0；试用 = 有免费试用期）；倍率 = 每次调用消耗积分的倍数，活动价优先；推理档位里的 [方括号] 那档，就是「当前强度」列实际会发出去的档位（你设过 /reasoning 或 config 就按你的来；显示"官方默认"= 该模型没声明档位，不发参数）；「xx:xx 恢复」= 该模型被上游按频率限流了（报文自带的恢复时间），换其它模型可继续用；额度只列总计与 3 天内到期的包；60 秒自动刷新一次。' }),
     body
     ] })
   })
@@ -424,8 +443,11 @@ export default {
         decorate({ provider, model }) {
           const models = RATE_CACHE.get(provider)
           if (!models) return null
-          const text = rateBadgeText(models.get(model))
-          return text ? { badge: text } : null
+          const row = models.get(model)
+          const text = rateBadgeText(row)
+          const icon = limitedDot(row, rateLimitHint(row))
+          if (!text && !icon) return null
+          return { badge: text || undefined, icon: icon || undefined }
         }
       }
     })

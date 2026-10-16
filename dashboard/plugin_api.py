@@ -129,16 +129,28 @@ def _variant_payload(provider: str) -> dict[str, Any]:
         })
     rows.sort(key=lambda row: (row["effective_multiplier"] is None, row["effective_multiplier"] or 0.0, row["id"]))
     account_limited_until = 0.0
+    rate_limited_models: list[dict[str, Any]] = []
     try:
         account_limited_until = float(profile.account_rate_limited_until() or 0.0)
+        limited = dict(profile.rate_limited_models() or {})
     except Exception:
-        account_limited_until = 0.0
+        account_limited_until, limited = 0.0, {}
+    for mid, until in limited.items():
+        try:
+            stamp = float(until or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if stamp > 0:
+            rate_limited_models.append({"id": mid, "until": stamp})
+    rate_limited_models.sort(key=lambda item: (-item["until"], item["id"]))
     return {
         "provider": provider,
         "label": profile.display_name,
         "region": account.get("region") or ("cn" if provider == "workbuddy" else "global"),
         "live": live,
+        # 口径：6004 是按**模型**限的，这里只报"哪些模型被限"，不声称账号整体不可用。
         "rate_limited_until": account_limited_until,
+        "rate_limited_models": rate_limited_models,
         "account": account,
         "usage": usage_payload,
         "credits": credits_payload,
