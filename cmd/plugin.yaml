@@ -1,0 +1,6 @@
+name: hermes-workbuddy-cmd
+version: 1.0.0
+description: WorkBuddy 会话命令 /workbuddy 与 CLI hermes workbuddy（配合 hermes-workbuddy 提供方包使用）
+author: EvaLov
+license: MIT
+tags: [workbuddy, models, credits]

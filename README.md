@@ -3,24 +3,29 @@
 WorkBuddy 模型在 [Hermes Agent](https://hermes-agent.nousresearch.com) 里的**进程内插件**——国内版（`workbuddy`）与国际版（`workbuddy-ai`）两个账户一起支持。
 形态：**无服务、无端口、无开机自启**；凭据只读本机 WorkBuddy 桌面客户端的登录态。
 
-## 一个统一包
+## 两个包（一个仓库）
 
-按 Hermes 的 **unified package** 约定，整个功能就是**一个可安装文件夹**：
+Hermes 规定 `kind: model-provider` 的插件**只走 providers/ 发现、不被插件管理器加载**（避免双重导入破坏提供方覆盖关系），
+所以"提供方"和"命令"两半必须分属两个包——一个仓库，两条安装命令：
 
 ```
-plugins/hermes-workbuddy/
-├── plugin.yaml            # kind: model-provider
-├── __init__.py            # 提供方（两个变体）+ register(ctx)：/workbuddy 命令
-├── dashboard/             # 面板后端 → /api/plugins/hermes-workbuddy/
+hermes-workbuddy/            # 仓库根 = 提供方包
+├── plugin.yaml              # kind: model-provider
+├── __init__.py              # 两个提供方变体（workbuddy / workbuddy-ai）
+├── dashboard/               # 面板后端 → /api/plugins/hermes-workbuddy/
 │   ├── manifest.json
-│   └── plugin_api.py      # GET /snapshot：账号 / 模型倍率 / 额度
-└── desktop/plugin.js      # 桌面半边（Electron 自动复制到 desktop-plugins/）
+│   └── plugin_api.py        # GET /snapshot：账号 / 模型倍率 / 额度
+├── desktop/plugin.js        # 桌面半边（Electron 自动复制到 desktop-plugins/）
+└── cmd/                     # 命令子包（第二条安装命令）
+    ├── plugin.yaml          # hermes-workbuddy-cmd
+    └── __init__.py          # /workbuddy 会话命令 + hermes workbuddy CLI
 ```
 
 ## 安装
 
 ```bash
-hermes plugins install January10/hermes-workbuddy
+hermes plugins install January10/hermes-workbuddy        # 提供方 + 面板后端 + 桌面页
+hermes plugins install January10/hermes-workbuddy#cmd    # /workbuddy 命令 + CLI（可选）
 ```
 
 装完后各部件在哪生效：
@@ -28,9 +33,9 @@ hermes plugins install January10/hermes-workbuddy
 | 部件 | 在哪 | 怎么激活 |
 | --- | --- | --- |
 | 提供方（`workbuddy` / `workbuddy-ai`） | 模型选择器 / `/model` | 装完即被识别（`kind: model-provider`） |
-| `/workbuddy` 命令 + `hermes workbuddy` CLI | 会话输入框 / 终端 | 同上；未生效则在 Capabilities → Plugins 启用一次 |
-| 桌面页（模型表 + 额度） | 桌面 App 的 WorkBuddy 页面 | Capabilities → Plugins → **Rescan**（桌面半边是副本） |
 | 面板后端 `/api/plugins/hermes-workbuddy/snapshot` | 桌面页数据源 | 随网关重启 |
+| 桌面页（模型表 + 额度） | 桌面 App 的 WorkBuddy 页面 | Capabilities → Plugins → **Rescan** + 打开开关（桌面半边是副本，默认关） |
+| `/workbuddy` 命令 + `hermes workbuddy` CLI | 会话输入框 / 终端 | 第二条命令装完后即用 |
 
 改完代码生效：**⌘K → 重启网关**（提供方插件的 Python 不被热加载）。
 
