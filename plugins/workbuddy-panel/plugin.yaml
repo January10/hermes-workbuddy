@@ -1,6 +1,0 @@
-name: workbuddy-panel
-version: 1.0.0
-description: WorkBuddy 面板后端 — 把国内版/国际版两类账户的账号、模型倍率与额度提供给桌面页面
-author: EvaLov
-license: MIT
-tags: [workbuddy, models, panel]

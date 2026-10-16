@@ -1,16 +1,38 @@
 # hermes-workbuddy
 
-WorkBuddy 模型在 [Hermes Agent](https://hermes-agent.nousresearch.com) 里的**进程内插件**实现（国内版 + 国际版两个账号）。
-形态：**无服务、无端口、无开机自启** —— 插件跑在 Hermes 进程里，凭据只读本机桌面客户端登录态。
+WorkBuddy 模型在 [Hermes Agent](https://hermes-agent.nousresearch.com) 里的**进程内插件**——国内版（`workbuddy`）与国际版（`workbuddy-ai`）两个账户一起支持。
+形态：**无服务、无端口、无开机自启**；凭据只读本机 WorkBuddy 桌面客户端的登录态。
 
-## 目录
+## 一个统一包
 
-| 路径 | 作用 |
-| --- | --- |
-| `plugins/model-providers/workbuddy/` | 提供方主体：模型目录（`data.models[]`）、倍率/状态、账号额度、用量钩子 |
-| `plugins/workbuddy-models/` | 模型清单辅助插件 |
-| `plugins/workbuddy-panel/dashboard/` | 面板后端 `GET /snapshot`（账号 / 模型 / 额度，30 秒缓存） |
-| `desktop-plugins/workbuddy-panel/` | 桌面页：模型表（倍率、上下文、能力、推理档位）+ 额度行 |
+按 Hermes 的 **unified package** 约定，整个功能就是**一个可安装文件夹**：
+
+```
+plugins/hermes-workbuddy/
+├── plugin.yaml            # kind: model-provider
+├── __init__.py            # 提供方（两个变体）+ register(ctx)：/workbuddy 命令
+├── dashboard/             # 面板后端 → /api/plugins/hermes-workbuddy/
+│   ├── manifest.json
+│   └── plugin_api.py      # GET /snapshot：账号 / 模型倍率 / 额度
+└── desktop/plugin.js      # 桌面半边（Electron 自动复制到 desktop-plugins/）
+```
+
+## 安装
+
+```bash
+hermes plugins install January10/hermes-workbuddy
+```
+
+装完后各部件在哪生效：
+
+| 部件 | 在哪 | 怎么激活 |
+| --- | --- | --- |
+| 提供方（`workbuddy` / `workbuddy-ai`） | 模型选择器 / `/model` | 装完即被识别（`kind: model-provider`） |
+| `/workbuddy` 命令 + `hermes workbuddy` CLI | 会话输入框 / 终端 | 同上；未生效则在 Capabilities → Plugins 启用一次 |
+| 桌面页（模型表 + 额度） | 桌面 App 的 WorkBuddy 页面 | Capabilities → Plugins → **Rescan**（桌面半边是副本） |
+| 面板后端 `/api/plugins/hermes-workbuddy/snapshot` | 桌面页数据源 | 随网关重启 |
+
+改完代码生效：**⌘K → 重启网关**（提供方插件的 Python 不被热加载）。
 
 ## 额度显示口径
 
@@ -18,18 +40,12 @@ WorkBuddy 模型在 [Hermes Agent](https://hermes-agent.nousresearch.com) 里的
 - **N 天内到期** = 该窗口内到期且**仍可用**的分数之和
 - 不展示包名 / 包明细 / 包数量
 
-## 安装
+## 凭据
 
-把这些目录放到 Hermes 数据目录下同名位置（`%LOCALAPPDATA%\hermes\...`），重启网关后生效：
+只读本机桌面客户端的登录态，**从不写入桌面状态**；仓库内**不含任何密钥或账号信息**，全部运行时读取。
+两个变体分别对应国内版与国际版客户端：哪个没登录，就只少那一个账户的数据。
 
-```
-plugins/model-providers/workbuddy/   -> %LOCALAPPDATA%\hermes\plugins\model-providers\workbuddy\
-plugins/workbuddy-models/           -> %LOCALAPPDATA%\hermes\plugins\workbuddy-models\
-plugins/workbuddy-panel/            -> %LOCALAPPDATA%\hermes\plugins\workbuddy-panel\
-desktop-plugins/workbuddy-panel/    -> %LOCALAPPDATA%\hermes\desktop-plugins\workbuddy-panel\
-```
+## 已知边界
 
-## 说明
-
-- 凭据来源：本机 WorkBuddy 桌面客户端的登录态（只读，从不写入桌面状态）。
-- 仓库内**不含任何密钥或账号信息**，全部运行时读取。
+- `kind: model-provider` 的包会被 `hermes plugins list` 当普通插件列出，但 **`plugins.enable/disable` 对它不起作用**——提供方发现路径不读 `plugins.enabled`（Hermes 自身的缝）。
+- 桌面半边运行的是 `desktop-plugins/<id>/` 里的**副本**，不是本目录：改了 `desktop/plugin.js` 需要 Rescan 或重启才会同步。

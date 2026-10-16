@@ -1,0 +1,7 @@
+name: hermes-workbuddy
+kind: model-provider
+version: 2.0.0
+description: WorkBuddy 两类账户（国内版 workbuddy / 国际版 workbuddy-ai）—— 用本机桌面登录调它们的模型，并附带 /workbuddy 面板、桌面页与额度视图
+author: EvaLov
+license: MIT
+tags: [workbuddy, models, credits, panel]
