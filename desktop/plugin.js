@@ -2,8 +2,8 @@
  * WorkBuddy 面板 —— 桌面 App 里的一页（`/workbuddy` + 侧边栏入口 + ⌘K 命令）。
  *
  * 数据走 `ctx.rest('/snapshot')`，也就是本插件自己的 Python 后端
- * `~/.hermes/plugins/workbuddy-panel/dashboard/plugin_api.py`（`/api/plugins/workbuddy-panel`）——
- * 那条路由再调 model-providers/workbuddy 的两个提供方 profile。全程进程内，没有第二个进程。
+ * `~/.hermes/plugins/hermes-workbuddy/dashboard/plugin_api.py`（`/api/plugins/hermes-workbuddy`）——
+ * 那条路由再调同一统一包注册的两个提供方 profile。全程进程内，没有第二个进程。
  *
  * 页面内容：两类账户（国内版 / 国际版）各自的
  * 账号（昵称、企业、uid、类型、令牌到期、登录文件）/ 额度 / 模型表（倍率 × 上下文 × 能力 × 推理档位）。
@@ -14,7 +14,7 @@
 import { host, MODEL_MENU_ROW_AREA, PALETTE_AREA, ROUTES_AREA, ScrollArea, SIDEBAR_NAV_AREA, useQuery, useQueryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-const PLUGIN_ID = 'workbuddy-panel'
+const PLUGIN_ID = 'hermes-workbuddy'
 const PAGE_PATH = '/workbuddy'
 const QUERY_KEY = [PLUGIN_ID, 'snapshot']
 

@@ -1246,7 +1246,7 @@ def _profile(provider: str):
 
         return get_provider_profile(provider)
     except Exception:
-        logger.debug("workbuddy-models: profile %s unavailable", provider, exc_info=True)
+        logger.debug("hermes-workbuddy: profile %s unavailable", provider, exc_info=True)
         return None
 
 
@@ -1286,14 +1286,14 @@ def _format_context(tokens: Any) -> str:
 def _snapshot(provider: str) -> dict[str, Any]:
     profile = _profile(provider)
     if profile is None:
-        return {"ok": False, "provider": provider, "error": f"没找到提供方 {provider}（plugins/model-providers/workbuddy）"}
+        return {"ok": False, "provider": provider, "error": f"没找到提供方 {provider}（plugins/hermes-workbuddy 统一包）"}
     labels = {"workbuddy": "国内版", "workbuddy-ai": "国际版"}
     models: list[str] = []
     live = True
     try:
         models = list(profile.fetch_models() or [])
     except Exception:
-        logger.debug("workbuddy-models: catalog fetch failed for %s", provider, exc_info=True)
+        logger.debug("hermes-workbuddy: catalog fetch failed for %s", provider, exc_info=True)
         live = False
     if not models:
         models = [str(model) for model in (profile.fallback_models or ())]
@@ -1302,12 +1302,12 @@ def _snapshot(provider: str) -> dict[str, Any]:
     try:
         usage = profile.fetch_account_usage()
     except Exception:
-        logger.debug("workbuddy-models: usage fetch failed for %s", provider, exc_info=True)
+        logger.debug("hermes-workbuddy: usage fetch failed for %s", provider, exc_info=True)
     account: dict[str, Any] = {}
     try:
         account = dict(profile.describe_account() or {})
     except Exception:
-        logger.debug("workbuddy-models: account snapshot failed for %s", provider, exc_info=True)
+        logger.debug("hermes-workbuddy: account snapshot failed for %s", provider, exc_info=True)
     return {
         "ok": True,
         "provider": provider,
@@ -1440,7 +1440,7 @@ def _handle_command(raw_args: str) -> str:
     try:
         return _render(raw_args or "")
     except Exception as exc:  # never take the session down over a readout
-        logger.debug("workbuddy-models: render failed", exc_info=True)
+        logger.debug("hermes-workbuddy: render failed", exc_info=True)
         return f"WorkBuddy 面板出错：{type(exc).__name__}: {exc}"
 
 

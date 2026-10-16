@@ -1,7 +1,7 @@
-"""WorkBuddy 面板后端 —— 挂载在 ``/api/plugins/workbuddy-panel``。
+"""WorkBuddy 面板后端 —— 挂载在 ``/api/plugins/hermes-workbuddy``。
 
-桌面 App 的 WorkBuddy 页面（``~/.hermes/desktop-plugins/workbuddy-panel/plugin.js``）通过
-``ctx.rest('/snapshot')`` 读这里；数据全部来自 ``model-providers/workbuddy`` 那两个提供方 profile
+桌面 App 的 WorkBuddy 页面（``desktop-plugins/hermes-workbuddy/plugin.js``，统一包的桌面半边）通过
+``ctx.rest('/snapshot')`` 读这里；数据全部来自同一个统一包注册的两个提供方 profile
 （同进程，无子进程、无端口、无服务）。
 
 * ``GET /snapshot`` — 两个变体的账号 / 模型（含倍率、上下文、能力、推理档位）/ 额度
@@ -53,7 +53,7 @@ def _variant_payload(provider: str) -> dict[str, Any]:
     try:
         models = list(profile.fetch_models() or [])
     except Exception:
-        log.debug("workbuddy-panel: catalog fetch failed for %s", provider, exc_info=True)
+        log.debug("workbuddy: catalog fetch failed for %s", provider, exc_info=True)
         live = False
     if not models:
         models = [str(model) for model in (profile.fallback_models or ())]
@@ -65,14 +65,14 @@ def _variant_payload(provider: str) -> dict[str, Any]:
     try:
         account = dict(profile.describe_account() or {})
     except Exception:
-        log.debug("workbuddy-panel: account snapshot failed for %s", provider, exc_info=True)
+        log.debug("workbuddy: account snapshot failed for %s", provider, exc_info=True)
     usage_payload: dict[str, Any] | None = None
     credits_payload: dict[str, Any] | None = None
     try:
         usage = profile.fetch_account_usage()
     except Exception:
         usage = None
-        log.debug("workbuddy-panel: usage fetch failed for %s", provider, exc_info=True)
+        log.debug("workbuddy: usage fetch failed for %s", provider, exc_info=True)
     if usage is not None:
         usage_payload = {
             "title": usage.title,
@@ -95,7 +95,7 @@ def _variant_payload(provider: str) -> dict[str, Any]:
     try:
         promotions = [dict(item) for item in profile.promotions_list()]
     except Exception:
-        log.debug("workbuddy-panel: promotions snapshot failed for %s", provider, exc_info=True)
+        log.debug("workbuddy: promotions snapshot failed for %s", provider, exc_info=True)
 
     rows: list[dict[str, Any]] = []
     for mid in models:
@@ -145,7 +145,7 @@ def _snapshot(force: bool = False) -> dict[str, Any]:
         try:
             variants.append(_variant_payload(provider))
         except Exception as exc:  # one broken variant must not blank the page
-            log.debug("workbuddy-panel: variant %s failed", provider, exc_info=True)
+            log.debug("workbuddy: variant %s failed", provider, exc_info=True)
             variants.append({"provider": provider, "label": provider, "error": f"{type(exc).__name__}: {exc}"})
     payload = {"ok": True, "fetched_at": int(now), "variants": variants}
     with _LOCK:
@@ -166,5 +166,5 @@ def snapshot(force: bool = False) -> dict[str, Any]:
     try:
         return _snapshot(force=bool(force))
     except Exception as exc:
-        log.warning("workbuddy-panel: snapshot failed", exc_info=True)
+        log.warning("workbuddy: snapshot failed", exc_info=True)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
