@@ -1308,7 +1308,9 @@ def _make_error_classifier(variant: Variant):
             "reason": "rate_limit",
             "retryable": True,          # 暂时的：退避之后还能用
             "should_rotate_credential": False,   # 账号级限流，换 key 没用
-            "should_fallback": True,    # 但可以让回退链换一个模型
+            # 只展示、不自动换模型（用户定的）：撞限流时把卡摆在他面前，由他自己决定。
+            # False 同时让 _profile_verdict 保留 rate_limit 家族默认的"退避后重试"行为。
+            "should_fallback": False,
             "error_context": {
                 "workbuddy_scope": "account",
                 "workbuddy_reset_at": reset_at or 0.0,
