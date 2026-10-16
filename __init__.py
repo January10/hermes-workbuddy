@@ -28,9 +28,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
@@ -54,6 +56,69 @@ RESOURCE_WINDOW_MS = 3000 * 24 * 3600 * 1000          # 3000 天（实际上不�
 RESOURCE_PAGE_SIZE = 500
 BILLING_USER_AGENT = CLI_UA  # 计费端点的 UA 就是 CLI 那个（DSH 用的是同一个常量）
 SIGN_IN_HELP = "本机桌面版还没登录：打开对应的 WorkBuddy 桌面客户端登录一次。"
+
+
+class _RateLimits:
+    """进程内记的"上游限流"事实：模型 -> 恢复时间戳（epoch 秒）。
+
+    只活在这个进程里，不落盘、不建服务 —— 面板与模型选择器读它来标红（用户自己决定换不换模型）。
+    上游 6004 报文自带 ``usage will reset at <时间>``，有就用它，没有就按默认窗口估一个。
+
+    **每个提供方一个实例**：国内版与国际版是两个独立账号，一个被限流不能污染另一个。
+    """
+
+    DEFAULT_COOLDOWN_S = 900.0   # 上游没给恢复时间时的保守估计
+
+    def __init__(self, variant_id: str = "") -> None:
+        self.variant_id = variant_id
+        self._until: dict[str, float] = {}
+        self.account_until: float = 0.0   # 整个账号级（6004 是账号频率上限，不只是某个模型）
+
+    def mark(self, model: str | None, *, until: float | None = None) -> None:
+        stamp = until if isinstance(until, (int, float)) and until > time.time() else time.time() + self.DEFAULT_COOLDOWN_S
+        self.account_until = max(self.account_until, stamp)
+        model_id = str(model or "").strip()
+        if model_id:
+            self._until[model_id] = max(self._until.get(model_id, 0.0), stamp)
+
+    def until(self, model: str | None = None) -> float:
+        """该模型（或整个账号）的限流解除时间戳；0 = 没在限流。"""
+        now = time.time()
+        self._until = {key: value for key, value in self._until.items() if value > now}
+        if self.account_until <= now:
+            self.account_until = 0.0
+        if model:
+            return max(self._until.get(str(model), 0.0), self.account_until, 0.0)
+        return max([self.account_until, *self._until.values()], default=0.0)
+
+    def clear(self) -> None:
+        self._until.clear()
+        self.account_until = 0.0
+
+
+# 变体 id -> _RateLimits（两个账号各记各的，互不污染）。
+RATE_LIMITS: dict[str, _RateLimits] = {}
+
+
+def _limits_for(variant: Variant) -> _RateLimits:
+    """该变体的限流账本（按需建）。"""
+    return RATE_LIMITS.setdefault(variant.id, _RateLimits(variant.id))
+
+# 上游 400 里的"账号频率上限"码（报文自带恢复时间）。
+FREQUENCY_CODES = ("6004", "5901")
+_RESET_AT_RE = re.compile(r"reset\s+at\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+
+
+def _parse_reset_at(message: str) -> float | None:
+    """从上游报文里抠 ``usage will reset at 2026-10-16 20:44:55 UTC+8`` → epoch 秒。"""
+    match = _RESET_AT_RE.search(str(message or ""))
+    if not match:
+        return None
+    try:
+        year, month, day, hour, minute, second = (int(part) for part in match.groups())
+        return datetime(year, month, day, hour, minute, second, tzinfo=timezone(timedelta(hours=8))).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 # ── 两个变体 ──────────────────────────────────────────────────────────────────
@@ -906,6 +971,19 @@ class WorkBuddyProfile(ProviderProfile):
         """目录里声明的档位（热路径，只读缓存：``fetch_models`` 时学回来）。"""
         return self.model_efforts.get(str(model or ""))
 
+    # ── 上游限流：让 Hermes 把 6004 认成 rate_limit（错误卡显示归因 + 恢复时间） ──────
+    # 钩子由 ``_make_error_classifier(variant)`` 在 register 时以**实例属性**注入
+    # （``ProviderProfile.__init__`` 会把 ``classify_api_error`` 置 None，定义成类方法会被它盖掉）。
+    # 注入时同时把事实记进 RATE_LIMITS —— 面板与模型选择器读它标红。
+
+    def model_rate_limited_until(self, model: str | None) -> float:
+        """该模型（或本账号）当前的限流解除时间戳；0 = 正常。面板/徽标用。"""
+        return max(_limits_for(self.variant).until(model), 0.0)
+
+    def account_rate_limited_until(self) -> float:
+        """整个账号的限流解除时间戳；0 = 正常。"""
+        return max(_limits_for(self.variant).until(), 0.0)
+
     def model_status(self, model: str | None) -> str | None:
         """徽标用的短状态：``限免`` / ``免费`` / ``试用`` / ``限时 ×0.5`` / ``×0.79``。"""
         model_id = str(model or "")
@@ -1191,6 +1269,73 @@ class GlobalWorkBuddyProfile(WorkBuddyProfile):
     variant = GLOBAL
 
 
+def _make_error_classifier(variant: Variant):
+    """``classify_api_error`` 钩子：把上游的"账号频率上限"（6004/5901）认成 ``rate_limit``。
+
+    返回 ``{"reason": "rate_limit", ...}`` 后，Hermes 的错误卡就会显示归因与恢复时间，
+    并按「退避后重试」处理（而不是盲目换凭据 —— 这是账号级限制，换 key 没用）。
+    钩子**必须**以实例属性注入：``ProviderProfile.__init__`` 把 ``classify_api_error`` 置成
+    ``None``，写成类方法会被这个实例属性盖掉（实测：``getattr(profile, 'classify_api_error')``
+    拿到类方法、但实例上是 ``None``）。
+
+    同时把命中的模型记进 ``RATE_LIMITS`` —— 桌面页与模型选择器读它标「xx:xx 恢复」。
+    """
+
+    def classify(error: Any = None, *, status_code: int | None = None,
+                 error_code: str | None = None, message: str = "",
+                 body: Any = None, model: str | None = None, **_: Any) -> dict[str, Any] | None:
+        code = str(error_code or "").strip()
+        # ``message`` 由 Hermes 传进来时已小写；自己拼一份原文，好从报文里抠恢复时间。
+        text = f"{message or ''} {error or ''}"
+        lowered = text.lower()
+        hit = (
+            code in FREQUENCY_CODES
+            or "exceeds frequency limit" in lowered
+            or any(f'"code":{item}' in text or f'"code": {item}' in text for item in FREQUENCY_CODES)
+        )
+        if not hit:
+            return None
+        reset_at = _parse_reset_at(text)
+        if reset_at is None and body:
+            reset_at = _parse_reset_at(json.dumps(body, ensure_ascii=False))
+        _limits_for(variant).mark(model, until=reset_at)
+        _stamp_reset_at(error, reset_at)
+        when = ""
+        if reset_at:
+            when = f"，{datetime.fromtimestamp(reset_at).strftime('%H:%M')} 后恢复"
+        logger.info("workbuddy: 上游频率限流命中（model=%s%s）", model, when)
+        return {
+            "reason": "rate_limit",
+            "retryable": True,          # 暂时的：退避之后还能用
+            "should_rotate_credential": False,   # 账号级限流，换 key 没用
+            "should_fallback": True,    # 但可以让回退链换一个模型
+            "error_context": {
+                "workbuddy_scope": "account",
+                "workbuddy_reset_at": reset_at or 0.0,
+            },
+        }
+
+    return classify
+
+
+def _stamp_reset_at(error: Any, reset_at: float | None) -> None:
+    """把上游的恢复时间戳写回异常体，好让错误卡显示「xx:xx 恢复」。
+
+    错误卡那句 ``Limit resets at HH:mm`` 走的是 ``extract_api_error_context(exc)``，
+    它只认 ``exc.body`` 里的 ``reset_at`` / ``resets_at`` / ``retry_after``（**不读**钩子返回的
+    ``error_context``）。上游给的是 ``... will reset at 2026-10-16 20:44:55 UTC+8`` 这种自由文本，
+    谁也解析不出来，所以钩子里主动补一个标准字段 —— 否则卡上只有归因、没有时间。
+    """
+    if not reset_at:
+        return
+    body = getattr(error, "body", None)
+    if isinstance(body, dict) and not any(body.get(key) for key in ("reset_at", "resets_at", "retry_after")):
+        try:
+            body["reset_at"] = reset_at
+        except (TypeError, AttributeError):
+            logger.debug("workbuddy: 无法把 reset_at 写回异常体", exc_info=True)
+
+
 def _build_profile(variant: Variant, profile_cls: type[WorkBuddyProfile]) -> WorkBuddyProfile:
     return profile_cls(
         name=variant.id,
@@ -1212,6 +1357,7 @@ def _build_profile(variant: Variant, profile_cls: type[WorkBuddyProfile]) -> Wor
         supports_vision=True,
         auth_handler=_make_auth_handler(variant),
         refresh_credential=_make_refresh(variant),
+        classify_api_error=_make_error_classifier(variant),
     )
 
 

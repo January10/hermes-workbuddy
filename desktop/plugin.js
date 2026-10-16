@@ -29,6 +29,9 @@ const RATE_CACHE = new Map()
 
 function rateBadgeText(row) {
   if (!row) return null
+  // 运行时事实最优先：正在被上游限流就先说这个（比"限免 ×0"重要得多）。
+  const limited = rateLimitText(row)
+  if (limited) return `限流·${limited}`
   // 上游状态优先（限免 / 免费 / 试用 / 免费路由），没有就退回基础倍率。
   if (typeof row.status === 'string' && row.status.trim()) return row.status.trim()
   const value = row.effective_multiplier !== undefined ? row.effective_multiplier : row.multiplier
@@ -100,8 +103,32 @@ function creditTotal(credits) {
 
 /** 状态列的短标签：上游活动/试用优先，其次基础倍率。 */
 function rowStatus(row) {
+  if (rateLimitText(row)) return rateLimitText(row)
   if (row.status) return row.status
   return fmtRate(row)
+}
+
+/**
+ * 运行时限流标记（用户要的 A 方案）：只有真的撞到上游限流才出现。
+ * 返回 null 表示没在限流。时间来自上游报文（reset at），本地只负责显示到分钟。
+ */
+function rateLimitText(row) {
+  const until = Number(row && row.rate_limited_until)
+  if (!Number.isFinite(until) || until <= 0) return null
+  const left = until * 1000 - Date.now()
+  if (left <= 0) return null
+  const at = new Date(until * 1000)
+  const hh = String(at.getHours()).padStart(2, '0')
+  const mm = String(at.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm} 恢复`
+}
+
+/** 剩余多久（人话）：给 title/tooltip 用。 */
+function rateLimitHint(row) {
+  const until = Number(row && row.rate_limited_until)
+  if (!Number.isFinite(until) || until <= 0) return ''
+  const mins = Math.max(0, Math.round((until * 1000 - Date.now()) / 60_000))
+  return `上游账号频率上限，预计 ${mins} 分钟后（${new Date(until * 1000).toLocaleTimeString()}）解除`
 }
 
 /** 实际会发出的思考档位：没声明档位的模型不发参数（用官方默认）。 */
@@ -120,6 +147,7 @@ function fmtEfforts(row) {
 }
 
 function statusTone(row) {
+  if (rateLimitText(row)) return { color: 'var(--ui-accent)', fontWeight: 700 }
   if (row.status === '限免' || row.status === '免费' || row.free === true) {
     return { color: 'var(--ui-accent)', fontWeight: 600 }
   }
@@ -259,7 +287,7 @@ function ModelTable({ variant }) {
   models.forEach((row) => {
     rows.push(jsxs('div', { key: row.id, style: GRID, children: [
       jsx('div', { style: { ...MONO, overflowWrap: 'anywhere' }, children: row.id }),
-      jsx('div', { title: row.status_detail || '', style: statusTone(row), children: rowStatus(row) }),
+      jsx('div', { title: rateLimitHint(row) || row.status_detail || '', style: statusTone(row), children: rowStatus(row) }),
       jsx('div', {
         style: row.multiplier === 0 ? { color: 'var(--ui-accent)', fontWeight: 600 } : undefined,
         children: fmtRate(row)
@@ -278,6 +306,20 @@ function ModelTable({ variant }) {
   return jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' }, children: rows })
 }
 
+/** 账号级限流横幅：整个账号被上游按频率挡住时，卡片顶部单独说一行。 */
+function AccountRateLimit({ variant }) {
+  const until = Number(variant && variant.rate_limited_until)
+  if (!Number.isFinite(until) || until <= 0) return null
+  const left = until * 1000 - Date.now()
+  if (left <= 0) return null
+  const mins = Math.max(1, Math.round(left / 60_000))
+  const at = new Date(until * 1000).toLocaleTimeString()
+  return jsx('div', {
+    style: { fontSize: '12px', fontWeight: 600, color: 'var(--ui-accent)' },
+    children: `账号被上游限流（频率上限）：约 ${mins} 分钟后（${at}）恢复；这期间换模型也可能继续撞墙。`
+  })
+}
+
 function VariantCard({ variant }) {
   return jsxs('section', { style: CARD, children: [
     jsxs('header', { style: { display: 'flex', alignItems: 'baseline', gap: '8px' }, children: [
@@ -285,6 +327,7 @@ function VariantCard({ variant }) {
       jsx('div', { style: MUTED_SMALL, children: variant.provider }),
       variant.live === false ? jsx('div', { style: { ...MUTED_SMALL, color: 'var(--ui-accent)' }, children: '（回退清单）' }) : null
     ] }),
+    jsx(AccountRateLimit, { variant }),
     jsx(AccountLine, { variant }),
     jsx('div', { style: { height: '1px', background: 'var(--ui-stroke-secondary)' } }),
     jsx(UsageLines, { variant }),
@@ -344,7 +387,7 @@ function WorkBuddyPage() {
         children: ['刷新']
       })
     ] }),
-    jsx('div', { style: MUTED_SMALL, children: '状态 = 上游给的活动/试用标记（限免 = 活动期内免费；免费 = 基础倍率 ×0；试用 = 有免费试用期）；倍率 = 每次调用消耗积分的倍数，活动价优先；推理档位里的 [方括号] 那档，就是「当前强度」列实际会发出去的档位（你设过 /reasoning 或 config 就按你的来；显示"官方默认"= 该模型没声明档位，不发参数）；额度只列总计与 3 天内到期的包；60 秒自动刷新一次。' }),
+    jsx('div', { style: MUTED_SMALL, children: '状态 = 上游给的活动/试用标记（限免 = 活动期内免费；免费 = 基础倍率 ×0；试用 = 有免费试用期）；倍率 = 每次调用消耗积分的倍数，活动价优先；推理档位里的 [方括号] 那档，就是「当前强度」列实际会发出去的档位（你设过 /reasoning 或 config 就按你的来；显示"官方默认"= 该模型没声明档位，不发参数）；「xx:xx 恢复」= 上游按频率挡住了这个账号（报文自带的恢复时间），换模型或等它过去；额度只列总计与 3 天内到期的包；60 秒自动刷新一次。' }),
     body
     ] })
   })

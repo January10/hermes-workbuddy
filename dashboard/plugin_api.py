@@ -106,6 +106,12 @@ def _variant_payload(provider: str) -> dict[str, Any]:
             effective = profile.model_effective_multiplier(mid)
         except Exception:
             status, status_detail, effective = None, "", _rate_number(rates.get(mid))
+        # 运行时事实（用户定的 A 方案）：最近撞到上游限流就标出来，他自己决定换不换模型。
+        limited_until = 0.0
+        try:
+            limited_until = float(profile.model_rate_limited_until(mid) or 0.0)
+        except Exception:
+            limited_until = 0.0
         rows.append({
             "id": mid,
             "credits": rates.get(mid),
@@ -114,6 +120,7 @@ def _variant_payload(provider: str) -> dict[str, Any]:
             "free": effective == 0,
             "status": status,
             "status_detail": status_detail,
+            "rate_limited_until": limited_until,
             "context_window": capability.get("context_window"),
             "supports_tools": bool(capability.get("supports_tools")),
             "supports_vision": bool(capability.get("supports_vision")),
@@ -121,11 +128,17 @@ def _variant_payload(provider: str) -> dict[str, Any]:
             "reasoning_efforts": list(efforts.get(mid) or ()),
         })
     rows.sort(key=lambda row: (row["effective_multiplier"] is None, row["effective_multiplier"] or 0.0, row["id"]))
+    account_limited_until = 0.0
+    try:
+        account_limited_until = float(profile.account_rate_limited_until() or 0.0)
+    except Exception:
+        account_limited_until = 0.0
     return {
         "provider": provider,
         "label": profile.display_name,
         "region": account.get("region") or ("cn" if provider == "workbuddy" else "global"),
         "live": live,
+        "rate_limited_until": account_limited_until,
         "account": account,
         "usage": usage_payload,
         "credits": credits_payload,
