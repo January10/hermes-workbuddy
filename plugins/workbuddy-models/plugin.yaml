@@ -1,0 +1,6 @@
+name: workbuddy-models
+version: 1.0.0
+description: 在会话里用 /workbuddy 查看 WorkBuddy 的模型、积分倍率与余额（配合 model-providers/workbuddy 提供方插件）
+author: EvaLov
+license: MIT
+tags: [workbuddy, models, credits]
