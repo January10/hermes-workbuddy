@@ -42,10 +42,12 @@ function rateBadgeText(row) {
   return `×${value}`
 }
 
-async function refreshRateCache() {
+async function refreshRateCache(force = false) {
   if (!restRequest) return
   try {
-    const data = await restRequest('/snapshot', { timeoutMs: 30_000 })
+    // force=true 时绕过后端 30 秒缓存 —— 否则「刷新」按钮只会刷新页面，
+    // 模型选择器里的徽标还会拿那份旧快照（要再等 5 分钟才轮到下一次）。
+    const data = await restRequest(force ? '/snapshot?force=1' : '/snapshot', { timeoutMs: 30_000 })
     const next = new Map()
     for (const variant of (data && data.variants) || []) {
       const models = new Map()
@@ -365,10 +367,14 @@ function WorkBuddyPage() {
   })
 
   const refresh = () => {
-    refreshRateCache()
+    // 顺序要紧：先 force 拉一次（绕过后端 30 秒缓存、真读上游），
+    // 拿到新数据后再更新徽标缓存和页面 —— 反过来会读到旧快照。
     restRequest('/snapshot?force=1', { timeoutMs: 30_000 })
       .catch(() => null)
-      .then(() => queryClient.invalidateQueries({ queryKey: QUERY_KEY }))
+      .then(() => {
+        refreshRateCache(true)
+        return queryClient.invalidateQueries({ queryKey: QUERY_KEY })
+      })
   }
 
   const data = query.data
