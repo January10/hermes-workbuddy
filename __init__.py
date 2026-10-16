@@ -1313,7 +1313,16 @@ def _make_error_classifier(variant: Variant):
             "should_fallback": False,
             "error_context": {
                 "workbuddy_scope": "account",
-                "workbuddy_reset_at": reset_at or 0.0,
+                # 用标准键名 ``reset_at``：凭据池的 _bench() 读 ``normalized_error["reset_at"]``
+                # 写进 entry.last_error_reset_at，于是 limit_state() 回报
+                # {"scope":"account","resets_at":…}，模型选择器就画出 core 自带的红色
+                # 「重置」徽标（我无法给那个 muted badge 上色，只能喂数据）。
+                "reset_at": reset_at or 0.0,
+                # ``reason`` 会被 _recover_rate_limit 拿去比 _USAGE_LIMIT_REASON_TOKENS，
+                # 命中就**跳过** has_retried_429 那次"先重试一次再说"的推迟，
+                # 第一次失败就直接 bench → 徽标立刻变红（上游原文里没有
+                # "usage limit reached" 这类词，不补这个就得等第二次失败）。
+                "reason": "usage_limit_reached",
             },
         }
 
@@ -1327,13 +1336,23 @@ def _stamp_reset_at(error: Any, reset_at: float | None) -> None:
     它只认 ``exc.body`` 里的 ``reset_at`` / ``resets_at`` / ``retry_after``（**不读**钩子返回的
     ``error_context``）。上游给的是 ``... will reset at 2026-10-16 20:44:55 UTC+8`` 这种自由文本，
     谁也解析不出来，所以钩子里主动补一个标准字段 —— 否则卡上只有归因、没有时间。
+
+    同一个道理：``turn_api_error`` 把 ``error_context`` 喂给恢复链时也走
+    ``extract_api_error_context``（只读 body），所以 ``reason`` 也要补进 body ——
+    ``_recover_rate_limit`` 靠它命中 ``_USAGE_LIMIT_REASON_TOKENS`` 来跳过一次"先重试"的推迟，
+    第一次失败就能 bench 掉凭据，模型选择器的红色徽标才会立刻出现。
     """
     if not reset_at:
         return
     body = getattr(error, "body", None)
-    if isinstance(body, dict) and not any(body.get(key) for key in ("reset_at", "resets_at", "retry_after")):
+    if isinstance(body, dict):
         try:
-            body["reset_at"] = reset_at
+            if not any(body.get(key) for key in ("reset_at", "resets_at", "retry_after")):
+                body["reset_at"] = reset_at
+            # ``extract_api_error_context`` 取 reason 的顺序是 code → type → error，
+            # 所以换掉 ``code`` 最省事（上游那个 6004 已经用完了，钩子也不再看它）。
+            if not body.get("reason"):
+                body["code"] = "usage_limit_reached"
         except (TypeError, AttributeError):
             logger.debug("workbuddy: 无法把 reset_at 写回异常体", exc_info=True)
 
