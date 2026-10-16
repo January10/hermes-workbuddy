@@ -104,8 +104,13 @@ class _RateLimits:
             if stamp > now:
                 self._until[str(model_id)] = stamp
 
-    def _save(self) -> None:
-        """合并写回（别的进程可能也记过账；同模型取较晚的解除时间）。"""
+    def _save(self, *, merge: bool = True) -> None:
+        """写回。
+
+        ``merge=True``（默认）合并盘上已有的（别的进程可能也记过账，同模型取较晚的解除时间）。
+        ``clear()`` 必须用 ``merge=False`` —— 否则刚清掉的条目会被盘上的旧值原样并回来，
+        ``clear()`` 变成空操作（内存里清了、文件里还在，两边长期不一致）。
+        """
         try:
             path = _state_path()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,8 +123,11 @@ class _RateLimits:
             except Exception:
                 data = {}
             variants = dict(data.get("variants") or {})
+            sources = [self._until]
+            if merge:
+                sources.insert(0, variants.get(self.variant_id) or {})
             merged = {}
-            for source in (variants.get(self.variant_id) or {}, self._until):
+            for source in sources:
                 if not isinstance(source, dict):
                     continue
                 for model_id, value in source.items():
@@ -158,7 +166,7 @@ class _RateLimits:
     def clear(self) -> None:
         self._load()
         self._until.clear()
-        self._save()
+        self._save(merge=False)
 
     def snapshot(self) -> dict[str, Any]:
         """当前还活着的限流时间戳（诊断用）。"""
@@ -199,17 +207,22 @@ _LAST_ACCOUNT: dict[str, str] = {}
 
 
 def _account_fingerprint(variant: Variant) -> str:
-    """能区分"是不是同一个登录"的最小指纹：uid + 令牌前缀。
+    """能区分"是不是同一个登录"的最小指纹 —— **只认账号身份（uid）**，不看令牌。
 
-    只读桌面登录文件，不写任何桌面状态。读不到就返回空串（视为未知，不做判断）。
+    令牌会被桌面客户端定期轮换（实测 19:49/19:50 就重写过登录文件并留了 backup）。
+    把令牌算进指纹的话，每次轮换都会被误判成"换了账号"，把限流记录清掉 ——
+    用户看到的就是"正常的模型切到被限的模型，又不显示限流了"。
+    没有 uid 的老记录才退回令牌前缀（聊胜于无）。
     """
     try:
         record = _desktop_record(variant)
     except Exception:
         return ""
-    uid = str(record.get("uid") or "")
+    uid = str(record.get("uid") or "").strip()
+    if uid:
+        return uid
     token = str(record.get("access_token") or "")
-    return f"{uid}:{token[:24]}" if (uid or token) else ""
+    return f"token:{token[:24]}" if token else ""
 
 
 def _forget_if_account_changed(variant: Variant) -> bool:
