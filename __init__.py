@@ -95,6 +95,14 @@ class _RateLimits:
         self._until.clear()
         self.account_until = 0.0
 
+    def snapshot(self) -> dict[str, Any]:
+        """当前还活着的限流时间戳（诊断用）。"""
+        now = time.time()
+        return {
+            "account": self.account_until if self.account_until > now else 0.0,
+            "models": {k: v for k, v in self._until.items() if v > now},
+        }
+
 
 # 变体 id -> _RateLimits（两个账号各记各的，互不污染）。
 RATE_LIMITS: dict[str, _RateLimits] = {}
@@ -103,6 +111,42 @@ RATE_LIMITS: dict[str, _RateLimits] = {}
 def _limits_for(variant: Variant) -> _RateLimits:
     """该变体的限流账本（按需建）。"""
     return RATE_LIMITS.setdefault(variant.id, _RateLimits(variant.id))
+
+
+# 变体 id -> 上次记录到的账号指纹（uid / 令牌）。换了账号就把账本清掉。
+_LAST_ACCOUNT: dict[str, str] = {}
+
+
+def _account_fingerprint(variant: Variant) -> str:
+    """能区分"是不是同一个登录"的最小指纹：uid + 令牌前缀。
+
+    只读桌面登录文件，不写任何桌面状态。读不到就返回空串（视为未知，不做判断）。
+    """
+    try:
+        record = _desktop_record(variant)
+    except Exception:
+        return ""
+    uid = str(record.get("uid") or "")
+    token = str(record.get("access_token") or "")
+    return f"{uid}:{token[:24]}" if (uid or token) else ""
+
+
+def _forget_if_account_changed(variant: Variant) -> bool:
+    """桌面登录换了账号就清掉该变体的限流账本；返回是否真的清了。
+
+    调用点：``classify_api_error`` 钩子（每次上游失败）与 ``auth_handler`` 的
+    add / refresh / logout —— 前者覆盖"只重登桌面客户端没跑 hermes auth"的情况，
+    后者覆盖显式的账号操作。没有这一步，旧账号的限流会一直挂在页面和模型选择器上。
+    """
+    fingerprint = _account_fingerprint(variant)
+    previous = _LAST_ACCOUNT.get(variant.id)
+    if fingerprint:
+        _LAST_ACCOUNT[variant.id] = fingerprint
+    changed = bool(previous) and bool(fingerprint) and previous != fingerprint
+    if changed:
+        _limits_for(variant).clear()
+        logger.info("workbuddy: %s 的登录换成了另一个账号，已清掉上一账号的限流记录", variant.id)
+    return changed
 
 # 上游 400 里的"账号频率上限"码（报文自带恢复时间）。
 FREQUENCY_CODES = ("6004", "5901")
@@ -852,6 +896,9 @@ def _make_auth_handler(variant: Variant):
             except Exception as exc:
                 print(f"{variant.label}: 凭据写入失败：{type(exc).__name__}: {exc}")
                 return True
+            # 换了账号（或重登）：把上一轮记下的限流清掉，否则页面/徽标还会报旧账号的限流。
+            _forget_if_account_changed(variant)
+            _limits_for(variant).clear()
             print(f"{variant.label}: 已从桌面登录写入凭据 {_describe(variant, record)}")
             return True
 
@@ -881,6 +928,7 @@ def _make_auth_handler(variant: Variant):
                 print(f"{variant.label}: 本机登录记录没有变化，也没有可用的 refresh token。")
                 return True
             load_pool(variant.id).reset_status(rows[0].id)
+            _limits_for(variant).clear()   # 新令牌 = 新的一轮，旧限流记录作废
             print(f"{variant.label}: 已取到{'新的' if rotated.get('access_token') != rows[0].access_token else '同一'}令牌，下次请求会重新解析。")
             return True
 
@@ -889,6 +937,8 @@ def _make_auth_handler(variant: Variant):
             rows = pool.entries()
             for index in range(len(rows), 0, -1):
                 pool.remove_index(index)
+            _limits_for(variant).clear()
+            _LAST_ACCOUNT.pop(variant.id, None)
             print(f"{variant.label}: 已移除 {len(rows)} 条凭据（桌面端的登录不受影响）。")
             return True
 
@@ -978,10 +1028,12 @@ class WorkBuddyProfile(ProviderProfile):
 
     def model_rate_limited_until(self, model: str | None) -> float:
         """该模型（或本账号）当前的限流解除时间戳；0 = 正常。面板/徽标用。"""
+        _forget_if_account_changed(self.variant)
         return max(_limits_for(self.variant).until(model), 0.0)
 
     def account_rate_limited_until(self) -> float:
         """整个账号的限流解除时间戳；0 = 正常。"""
+        _forget_if_account_changed(self.variant)
         return max(_limits_for(self.variant).until(), 0.0)
 
     def model_status(self, model: str | None) -> str | None:
@@ -1284,6 +1336,9 @@ def _make_error_classifier(variant: Variant):
     def classify(error: Any = None, *, status_code: int | None = None,
                  error_code: str | None = None, message: str = "",
                  body: Any = None, model: str | None = None, **_: Any) -> dict[str, Any] | None:
+        # 先看桌面登录有没有换成别的账号：换了就把上一轮的账本清掉，
+        # 否则"本地账号被限流 → 换账号登录"之后页面/徽标还在报旧账号的限流。
+        _forget_if_account_changed(variant)
         code = str(error_code or "").strip()
         # ``message`` 由 Hermes 传进来时已小写；自己拼一份原文，好从报文里抠恢复时间。
         text = f"{message or ''} {error or ''}"
