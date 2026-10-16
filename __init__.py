@@ -1357,8 +1357,13 @@ def _usage_block(snapshot: dict[str, Any]) -> str:
         return f"{snapshot['label']} 额度：取不到（桌面端没登录或上游没回应）。"
     lines = [f"{snapshot['label']} 额度"]
     for window in usage.windows:
-        remaining = "—" if window.used_percent is None else f"{round(100 - window.used_percent, 1)}%"
-        lines.append(f"  {window.label}：{window.detail}（剩余 {remaining}）")
+        # 只有窗口自带百分比（企业周期额度）才补「剩余 x%」；积分口径已在 detail 里说清，
+        # 再补一个「剩余 —」只会是噪音。
+        if window.used_percent is None:
+            lines.append(f"  {window.label}：{window.detail}")
+        else:
+            remaining = f"{round(100 - window.used_percent, 1)}%"
+            lines.append(f"  {window.label}：{window.detail}（剩余 {remaining}）")
     for detail in usage.details:
         lines.append(f"  {detail}")
     return "\n".join(lines)
